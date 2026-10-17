@@ -1,0 +1,4 @@
+#!/bin/sh
+# Maia 3 (23m model). Delegates to the shared launcher next to this file,
+# which builds the Python environment on first use.
+exec sh "$(cd "$(dirname "$0")" && pwd)/maia3" maia3-23m

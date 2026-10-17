@@ -1,0 +1,98 @@
+#!/bin/sh
+# Launcher for the Maia 3 UCI engine (https://github.com/CSSLab/maia3), the
+# human-like chess model from the University of Toronto CSSLab.
+#
+# Usage: maia3 <preset>   where preset is maia3-5m, maia3-23m or maia3-79m
+# (the maia3-5m/23m/79m scripts next to this file call it that way).
+#
+# maia3 is a Python package (not on PyPI). On first use this script builds a
+# Python 3.10+ virtual environment next to itself from a pinned GitHub
+# snapshot (this downloads PyTorch and takes a few minutes), then pre-caches
+# the model weights so the engine answers isready immediately. While that
+# happens a static UCI banner is printed so GUIs probing the engine with
+# uci/uciok are not blocked. Readiness is tracked with a marker file written
+# only after the install succeeds, so an interrupted setup is retried.
+#
+# The package's own entry point speaks UCI (options: Elo, SelfElo, OppoElo,
+# Temperature, TopP, MultiPV); this script only manages the environment.
+
+set -e
+DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV="$DIR/.maia3-venv"
+PY="$VENV/bin/python"
+READY="$DIR/.maia3-venv.ready"
+PRESET="${1:-maia3-23m}"
+MAIA3_SRC="https://github.com/CSSLab/maia3/archive/1e13597c42d4858b7cfd7cfdae01e297263364b2.tar.gz"
+
+banner() {
+    echo "id name Maia3"
+    echo "id author CSSLab"
+    echo "option name Elo type spin default 1500 min 0 max 5000"
+    echo "option name SelfElo type spin default 1500 min 0 max 5000"
+    echo "option name OppoElo type spin default 1500 min 0 max 5000"
+    echo "option name Temperature type string default 0.0"
+    echo "option name TopP type string default 1.0"
+    echo "option name MultiPV type spin default 5 min 1 max 20"
+    echo "uciok"
+}
+
+bootstrap() {
+    find_python() {
+        for cmd in python3.12 python3.11 python3.10 python3.13 python3; do
+            p="$(command -v "$cmd" 2>/dev/null)" || continue
+            "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null && { echo "$p"; return 0; }
+        done
+        return 1
+    }
+
+    if command -v uv >/dev/null 2>&1; then
+        # uv can fetch a suitable Python by itself; its venvs ship without
+        # pip, so the package is installed through uv too
+        uv venv --python 3.12 "$VENV" >&2
+        uv pip install --python "$PY" "$MAIA3_SRC" >&2
+    elif BASE_PY="$(find_python)"; then
+        [ -x "$PY" ] || "$BASE_PY" -m venv "$VENV" >&2
+        "$PY" -m pip install --disable-pip-version-check "$MAIA3_SRC" >&2
+    else
+        echo "info string error: no Python 3.10+ found. Install one (e.g. via uv or python.org) and retry." >&2
+        exit 1
+    fi
+    # pre-download the weights so the first isready does not block on network
+    "$VENV/bin/maia3-cache" --model "$PRESET" >&2 || true
+    touch "$READY"
+}
+
+if [ ! -f "$READY" ]; then
+    banner
+    echo "info string creating Python environment for Maia 3 (first run only)..." >&2
+
+    # exclusive lock so concurrent launches never build the environment
+    # twice; a lock older than 30 minutes is assumed stale
+    LOCK="$DIR/.maia3-venv.lock"
+    now=$(date +%s)
+    if [ -d "$LOCK" ] && [ $((now - $(stat -f %m "$LOCK" 2>/dev/null || echo 0))) -gt 1800 ]; then
+        rmdir "$LOCK" 2>/dev/null
+    fi
+    until mkdir "$LOCK" 2>/dev/null; do
+        echo "info string waiting for another Maia 3 setup to finish..." >&2
+        sleep 5
+        [ -f "$READY" ] && break
+    done
+    trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+    [ -f "$READY" ] || bootstrap
+    rmdir "$LOCK" 2>/dev/null
+    trap - EXIT
+fi
+
+# skip Hugging Face revision checks once the weights are cached locally
+case "$PRESET" in
+    maia3-5m) MODEL_DIR="Maia3-5M" ;;
+    maia3-23m) MODEL_DIR="Maia3-23M" ;;
+    maia3-79m) MODEL_DIR="Maia3-79M" ;;
+    *) MODEL_DIR="" ;;
+esac
+if [ -n "$MODEL_DIR" ] && [ -d "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--UofTCSSLab--$MODEL_DIR" ]; then
+    export HF_HUB_OFFLINE=1
+fi
+
+exec "$VENV/bin/$PRESET"

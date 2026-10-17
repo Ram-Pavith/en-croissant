@@ -1,0 +1,4 @@
+# local bootstrap artifacts created by the launcher on first use
+.maia3-venv/
+.maia3-venv.ready
+.maia3-venv.lock
